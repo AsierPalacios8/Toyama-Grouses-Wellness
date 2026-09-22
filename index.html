@@ -262,23 +262,36 @@
 
   // Cache of which player numbers have already answered today, fetched
   // from the Apps Script backend via JSONP (no CORS needed for GET).
+  // This cache is never wiped on navigation — only ever replaced by a
+  // fresh, successful fetch — so a player's green mark stays on screen
+  // (stale-but-correct) even while a background refresh is in flight,
+  // instead of flashing back to unanswered.
   var answeredCache = { date: null, nums: [] };
   var jsonpCounter = 0;
+  var fetchInFlight = false;
+  var lastFetchAttempt = 0;
+  var REFRESH_INTERVAL_MS = 15000; // re-check the sheet at most this often
 
   function fetchAnsweredToday(cb) {
+    if (fetchInFlight) return;
+    fetchInFlight = true;
     var date = todayKey();
     var cbName = "wellnessCb" + (jsonpCounter++);
     var script = document.createElement("script");
+    var finished = false;
+    function cleanup() {
+      if (finished) return;
+      finished = true;
+      fetchInFlight = false;
+      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
     window[cbName] = function (data) {
       answeredCache = { date: date, nums: (data && data.answered) ? data.answered.map(String) : [] };
-      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-      script.remove();
+      cleanup();
       cb();
     };
-    script.onerror = function () {
-      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
-      script.remove();
-    };
+    script.onerror = cleanup;
     script.src = WEBAPP_URL + "?date=" + encodeURIComponent(date) + "&callback=" + cbName;
     document.body.appendChild(script);
   }
@@ -349,18 +362,24 @@
   function renderSelect() {
     var wrap = el("div", {}, []);
     var today = todayKey();
-    var haveFreshData = answeredCache.date === today;
+    // Use whatever we currently have cached for today (even if it's about
+    // to be refreshed in the background) so marks never disappear/flash.
+    var haveDataForToday = answeredCache.date === today;
     wrap.appendChild(el("div", { class: "card" }, [
       el("p", { class: "q-sub", style: "text-transform:uppercase;font-weight:700;letter-spacing:.03em;" }, ["Select your name · 名前を選択"]),
       el("div", { class: "roster-grid" }, ROSTER.map(function (p) {
-        var isAnswered = haveFreshData && answeredCache.nums.indexOf(String(p.num)) !== -1;
+        var isAnswered = haveDataForToday && answeredCache.nums.indexOf(String(p.num)) !== -1;
         return el("button", {
           class: "player-btn" + (isAnswered ? " answered" : ""),
           onclick: function () { selectPlayer(p); }
         }, ["#" + p.num + " " + p.name]);
       }))
     ]));
-    if (!haveFreshData) {
+
+    var now = Date.now();
+    var stale = !haveDataForToday || (now - lastFetchAttempt > REFRESH_INTERVAL_MS);
+    if (stale && !fetchInFlight) {
+      lastFetchAttempt = now;
       fetchAnsweredToday(function () {
         if (state.screen === "select") render();
       });
@@ -379,7 +398,7 @@
     var wrap = el("div", {}, []);
     wrap.appendChild(el("button", {
       class: "back-link",
-      onclick: function () { answeredCache.date = null; state.screen = "select"; state.player = null; render(); }
+      onclick: function () { state.screen = "select"; state.player = null; render(); }
     }, ["‹ Change player · 選手を変更"]));
 
     var card = el("div", { class: "card" }, []);
