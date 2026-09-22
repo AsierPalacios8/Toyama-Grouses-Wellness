@@ -77,6 +77,12 @@
     cursor: pointer; text-align: center; transition: transform 0.08s ease;
   }
   .player-btn:active { transform: scale(0.97); }
+  .player-btn.answered {
+    background: #1f8a4c; border-color: #1f8a4c; color: #fff;
+  }
+  .player-btn.answered::after {
+    content: " ✓";
+  }
   .back-link {
     background: none; border: none; color: var(--red); font-size: 14px; font-weight: 600;
     cursor: pointer; padding: 4px 0 14px; display: inline-block;
@@ -254,6 +260,29 @@
   };
   QUESTIONS.forEach(function (q) { state.answers[q.key] = 5; });
 
+  // Cache of which player numbers have already answered today, fetched
+  // from the Apps Script backend via JSONP (no CORS needed for GET).
+  var answeredCache = { date: null, nums: [] };
+  var jsonpCounter = 0;
+
+  function fetchAnsweredToday(cb) {
+    var date = todayKey();
+    var cbName = "wellnessCb" + (jsonpCounter++);
+    var script = document.createElement("script");
+    window[cbName] = function (data) {
+      answeredCache = { date: date, nums: (data && data.answered) ? data.answered.map(String) : [] };
+      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+      script.remove();
+      cb();
+    };
+    script.onerror = function () {
+      try { delete window[cbName]; } catch (e) { window[cbName] = undefined; }
+      script.remove();
+    };
+    script.src = WEBAPP_URL + "?date=" + encodeURIComponent(date) + "&callback=" + cbName;
+    document.body.appendChild(script);
+  }
+
   function todayKey() {
     var d = new Date();
     var y = d.getFullYear();
@@ -319,12 +348,23 @@
 
   function renderSelect() {
     var wrap = el("div", {}, []);
+    var today = todayKey();
+    var haveFreshData = answeredCache.date === today;
     wrap.appendChild(el("div", { class: "card" }, [
       el("p", { class: "q-sub", style: "text-transform:uppercase;font-weight:700;letter-spacing:.03em;" }, ["Select your name · 名前を選択"]),
       el("div", { class: "roster-grid" }, ROSTER.map(function (p) {
-        return el("button", { class: "player-btn", onclick: function () { selectPlayer(p); } }, ["#" + p.num + " " + p.name]);
+        var isAnswered = haveFreshData && answeredCache.nums.indexOf(String(p.num)) !== -1;
+        return el("button", {
+          class: "player-btn" + (isAnswered ? " answered" : ""),
+          onclick: function () { selectPlayer(p); }
+        }, ["#" + p.num + " " + p.name]);
       }))
     ]));
+    if (!haveFreshData) {
+      fetchAnsweredToday(function () {
+        if (state.screen === "select") render();
+      });
+    }
     return wrap;
   }
 
@@ -339,7 +379,7 @@
     var wrap = el("div", {}, []);
     wrap.appendChild(el("button", {
       class: "back-link",
-      onclick: function () { state.screen = "select"; state.player = null; render(); }
+      onclick: function () { answeredCache.date = null; state.screen = "select"; state.player = null; render(); }
     }, ["‹ Change player · 選手を変更"]));
 
     var card = el("div", { class: "card" }, []);
@@ -397,6 +437,9 @@
     }).then(function () {
       state.saving = false;
       state.screen = "done";
+      if (answeredCache.date === todayKey() && answeredCache.nums.indexOf(String(p.num)) === -1) {
+        answeredCache.nums.push(String(p.num));
+      }
       render();
     }).catch(function () {
       state.saving = false;
@@ -419,6 +462,8 @@
         onclick: function () { if (state.doneTimer) clearTimeout(state.doneTimer); state.screen = "select"; state.player = null; render(); }
       }, ["Back to start now · 今すぐ戻る"])
     ]);
+    // Note: answeredCache is NOT invalidated here, since this player's
+    // number was already added to it optimistically in submitSurvey().
   }
 
   render();
